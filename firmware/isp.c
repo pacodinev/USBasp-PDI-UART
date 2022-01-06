@@ -231,11 +231,11 @@ uchar ispEnterProgrammingMode() {
 		spiHWdisable();
 
 		/* pulse RST */
-		for (n=((32-count)/4)+1;n>0;n++, ispDelay());
+		for (n=0;n<8;n++, ispDelay());
 		ISP_OUT |= (1 << ISP_RST); /* RST high */
-		for (n=((32-count)/4)+1;n>0;n++, ispDelay());
+		for (n=0;n<8;n++, ispDelay());
 		ISP_OUT &= ~(1 << ISP_RST); /* RST low */
-		for (n=((32-count)/4)+1;n>0;n++, ispDelay());
+		for (n=0;n<8;n++, ispDelay());
 
 		if (ispTransmit == ispTransmit_hw) {
 			spiHWenable();
