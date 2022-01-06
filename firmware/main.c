@@ -19,11 +19,12 @@
 #include <avr/wdt.h>
 
 #include "usbasp.h"
-#include "usbdrv.h"
+#include "usbdrv/usbdrv.h"
 #include "isp.h"
 #include "clock.h"
 #include "tpi.h"
 #include "tpi_defs.h"
+#include "uart.h"
 #include "pdi.h"
 #include <string.h>
 
@@ -44,11 +45,13 @@ static uchar prog_pagecounter;
 static uchar prog_buf[128];
 static uchar prog_buf_pos;
 
-uchar usbFunctionSetup(uchar data[8]) {
+#include <util/delay.h>
+usbMsgLen_t usbFunctionSetup(uchar data[8]) {
 
-	uchar len = 0;
+	usbMsgLen_t len = 0;
 
 	if (data[1] == USBASP_FUNC_CONNECT) {
+		uart_disable(); // make it not interefere.
 
 		/* set SCK speed */
 		if ((PINC & (1 << PC2)) == 0) {
@@ -81,7 +84,7 @@ uchar usbFunctionSetup(uchar data[8]) {
 
 		prog_nbytes = (data[7] << 8) | data[6];
 		prog_state = PROG_STATE_READFLASH;
-		len = 0xff; /* multiple in */
+		len = USB_NO_MSG; /* multiple in */
 
 	} else if (data[1] == USBASP_FUNC_READEEPROM) {
 
@@ -90,7 +93,7 @@ uchar usbFunctionSetup(uchar data[8]) {
 
 		prog_nbytes = (data[7] << 8) | data[6];
 		prog_state = PROG_STATE_READEEPROM;
-		len = 0xff; /* multiple in */
+		len = USB_NO_MSG; /* multiple in */
 
 	} else if (data[1] == USBASP_FUNC_ENABLEPROG) {
 		replyBuffer[0] = ispEnterProgrammingMode();
@@ -109,7 +112,7 @@ uchar usbFunctionSetup(uchar data[8]) {
 		}
 		prog_nbytes = (data[7] << 8) | data[6];
 		prog_state = PROG_STATE_WRITEFLASH;
-		len = 0xff; /* multiple out */
+		len = USB_NO_MSG; /* multiple out */
 
 	} else if (data[1] == USBASP_FUNC_WRITEEEPROM) {
 
@@ -120,7 +123,7 @@ uchar usbFunctionSetup(uchar data[8]) {
 		prog_blockflags = 0;
 		prog_nbytes = (data[7] << 8) | data[6];
 		prog_state = PROG_STATE_WRITEEEPROM;
-		len = 0xff; /* multiple out */
+		len = USB_NO_MSG; /* multiple out */
 
 	} else if (data[1] == USBASP_FUNC_SETLONGADDRESS) {
 
@@ -137,6 +140,7 @@ uchar usbFunctionSetup(uchar data[8]) {
 		len = 1;
 
 	} else if (data[1] == USBASP_FUNC_TPI_CONNECT) {
+		uart_disable(); // make it not interefere.
 		tpi_dly_cnt = data[2] | (data[3] << 8);
 
 		/* RST high */
@@ -183,16 +187,15 @@ uchar usbFunctionSetup(uchar data[8]) {
 		prog_address = (data[3] << 8) | data[2];
 		prog_nbytes = (data[7] << 8) | data[6];
 		prog_state = PROG_STATE_TPI_READ;
-		len = 0xff; /* multiple in */
+		len = USB_NO_MSG; /* multiple in */
 	
-	} else if (data[1] == USBASP_FUNC_GETCAPABILITIES) {
-		replyBuffer[0] = USBASP_CAP_0_TPI | USBASP_CAP_0_PDI;
-		replyBuffer[1] = 0;
-		replyBuffer[2] = 0;
-		replyBuffer[3] = 0;
-		len = 4;
-
-	} else if (data[1] == USBASP_FUNC_PDI_CONNECT)
+	} else if (data[1] == USBASP_FUNC_TPI_WRITEBLOCK) {
+		prog_address = (data[3] << 8) | data[2];
+		prog_nbytes = (data[7] << 8) | data[6];
+		prog_state = PROG_STATE_TPI_WRITE;
+		len = USB_NO_MSG; /* multiple out */
+	
+	}  else if (data[1] == USBASP_FUNC_PDI_CONNECT)
 		{
 		if ((replyBuffer[0]=pdiInit())==PDI_STATUS_OK)
 			ledRedOn();
@@ -218,6 +221,46 @@ uchar usbFunctionSetup(uchar data[8]) {
 		prog_state = PROG_STATE_PDI_READ;
 		len = 0xff;
 		}
+	// UART from now on:
+	else if(data[1]==USBASP_FUNC_UART_CONFIG){
+		uint16_t baud=(data[3]<<8)|data[2];
+		uint8_t par  = data[4] & USBASP_UART_PARITY_MASK;
+		uint8_t stop = data[4] & USBASP_UART_STOP_MASK;
+		uint8_t bytes= data[4] & USBASP_UART_BYTES_MASK;
+		uart_config(baud, par, stop, bytes);
+	}
+	else if(data[1]==USBASP_FUNC_UART_FLUSHTX){
+		uart_flush_tx();
+	}
+	else if(data[1]==USBASP_FUNC_UART_FLUSHRX){
+		uart_flush_rx();
+	}
+	else if(data[1]==USBASP_FUNC_UART_DISABLE){
+		uart_disable();
+	}
+	else if(data[1]==USBASP_FUNC_UART_TX){
+		prog_nbytes = (data[7] << 8) | data[6];
+		prog_state = PROG_STATE_UART_TX;
+		len=USB_NO_MSG; // multiple out
+	}
+	else if(data[1]==USBASP_FUNC_UART_RX){
+		prog_nbytes = (data[7] << 8) | data[6];
+		prog_state = PROG_STATE_UART_RX;
+		len=USB_NO_MSG; // multiple in
+	}
+	else if(data[1]==USBASP_FUNC_UART_TX_FREE){
+		uint16_t places=uart_tx_freeplaces();
+		replyBuffer[0]=places>>8;
+		replyBuffer[1]=places&0xFF;
+		len=2;
+	}
+	else if (data[1] == USBASP_FUNC_GETCAPABILITIES) {
+		replyBuffer[0] = USBASP_CAP_0_TPI|USBASP_CAP_6_UART|USBASP_CAP_0_PDI;
+		replyBuffer[1] = 0;
+		replyBuffer[2] = 0;
+		replyBuffer[3] = 0;
+		len = 4;
+	}
 
 	usbMsgPtr = replyBuffer;
 
@@ -228,16 +271,26 @@ uchar usbFunctionRead(uchar *data, uchar len) {
 
 	uchar i;
 
-	switch(prog_state)
-		{
+	switch (prog_state) {
 		case PROG_STATE_TPI_READ:
 			/* fill packet TPI mode */
 			tpi_read_block(prog_address, data, len);
 			prog_address += len;
 			return len;
-
+		
+		case PROG_STATE_UART_RX:
+			for(uint8_t rd=0; rd<len; rd++){
+				if(!uart_getc(data+rd)){
+					len=rd; // Emptied whole buffer.
+					break;
+				}
+			}
+			if(len<8){
+				prog_state=PROG_STATE_IDLE;
+			}
+			return len; // Whole data buffer written.
+		
 		case PROG_STATE_PDI_READ:
-			{
 			pdiDisableTimerClock();
 			pdiSendIdle();
 			if (pdi_nvmbusy)
@@ -248,29 +301,28 @@ uchar usbFunctionRead(uchar *data, uchar len) {
 				return 0;
 			prog_address += len;
 			return len;
-			}
-			
+
 		case PROG_STATE_READFLASH:
 		case PROG_STATE_READEEPROM:
 			/* fill packet ISP mode */
 			for (i = 0; i < len; i++) {
-			if (prog_state == PROG_STATE_READFLASH) {
-			data[i] = ispReadFlash(prog_address);
-			} else {
-			data[i] = ispReadEEPROM(prog_address);
+				if (prog_state == PROG_STATE_READFLASH) {
+					data[i] = ispReadFlash(prog_address);
+				} else {
+					data[i] = ispReadEEPROM(prog_address);
+				}
+				prog_address++;
 			}
-			prog_address++;
-			}
-			
+
 			/* last packet? */
 			if (len < 8) {
-			prog_state = PROG_STATE_IDLE;
+				prog_state = PROG_STATE_IDLE;
 			}
 			break;
 
-		default: //incorrect read state
-			return 0xff;
-		}
+		default:
+			return 0xFF;
+	}
 
 	return len;
 }
@@ -280,21 +332,34 @@ uchar usbFunctionWrite(uchar *data, uchar len) {
 	uchar retVal = 0;
 	uchar i;
 
-	switch(prog_state)
-		{
+	switch (prog_state) {
 		case PROG_STATE_TPI_WRITE:
 			tpi_write_block(prog_address, data, len);
 			prog_address += len;
 			prog_nbytes -= len;
 			if(prog_nbytes <= 0)
-				{
+			{
 				prog_state = PROG_STATE_IDLE;
 				return 1;
-				}
+			}
+			return 0;
+		
+		case PROG_STATE_UART_TX:
+			if(len){
+				uart_putsn(data, len);
+				// This function should succeed, since computer should
+				// request correct number of bytes. If request is bad,
+				// return anything.
+			}
+
+			prog_nbytes-=len;
+			if(prog_nbytes<=0){
+				prog_state=PROG_STATE_IDLE;
+				return 1;
+			}
 			return 0;
 
 		case PROG_STATE_PDI_SEND:
-			{
 			memmove(&prog_buf[prog_buf_pos],data,len);
 			prog_buf_pos += len;
 			prog_nbytes -= len;
@@ -312,54 +377,54 @@ uchar usbFunctionWrite(uchar *data, uchar len) {
 				return 1;
 				}
 			return 0;
-			}
 
 		case PROG_STATE_WRITEFLASH:
 		case PROG_STATE_WRITEEEPROM:
-	for (i = 0; i < len; i++) {
+			for (i = 0; i < len; i++) {
 
-		if (prog_state == PROG_STATE_WRITEFLASH) {
-			/* Flash */
+				if (prog_state == PROG_STATE_WRITEFLASH) {
+					/* Flash */
 
-			if (prog_pagesize == 0) {
-				/* not paged */
-				ispWriteFlash(prog_address, data[i], 1);
-			} else {
-				/* paged */
-				ispWriteFlash(prog_address, data[i], 0);
-				prog_pagecounter--;
-				if (prog_pagecounter == 0) {
-					ispFlushPage(prog_address, data[i]);
-					prog_pagecounter = prog_pagesize;
+					if (prog_pagesize == 0) {
+						/* not paged */
+						ispWriteFlash(prog_address, data[i], 1);
+					} else {
+						/* paged */
+						ispWriteFlash(prog_address, data[i], 0);
+						prog_pagecounter--;
+						if (prog_pagecounter == 0) {
+							ispFlushPage(prog_address, data[i]);
+							prog_pagecounter = prog_pagesize;
+						}
+					}
+
+				} else {
+					/* EEPROM */
+					ispWriteEEPROM(prog_address, data[i]);
 				}
+
+				prog_nbytes--;
+
+				if (prog_nbytes == 0) {
+					prog_state = PROG_STATE_IDLE;
+					if ((prog_blockflags & PROG_BLOCKFLAG_LAST) && (prog_pagecounter
+							!= prog_pagesize)) {
+
+						/* last block and page flush pending, so flush it now */
+						ispFlushPage(prog_address, data[i]);
+					}
+
+					retVal = 1; // Need to return 1 when no more data is to be received
+				}
+
+				prog_address++;
 			}
+			break;
 
-		} else {
-			/* EEPROM */
-			ispWriteEEPROM(prog_address, data[i]);
-		}
+		default:
+			return 0xFF;
 
-		prog_nbytes--;
-
-		if (prog_nbytes == 0) {
-			prog_state = PROG_STATE_IDLE;
-			if ((prog_blockflags & PROG_BLOCKFLAG_LAST) && (prog_pagecounter
-					!= prog_pagesize)) {
-
-				/* last block and page flush pending, so flush it now */
-				ispFlushPage(prog_address, data[i]);
-			}
-
-			retVal = 1; // Need to return 1 when no more data is to be received
-		}
-
-		prog_address++;
 	}
-	break;
-
-		default: //incorrect write state
-			return 0xff;
-		}
 
 	return retVal;
 }
@@ -372,6 +437,9 @@ int main(void) {
 	PORTB = 0;
 	/* all outputs except PD2 = INT0 */
 	DDRD = ~(1 << 2);
+
+	PORTD|=(1<<0); // pullup on Rx pin.
+	DDRD&=~(1<<0); // Rx as input too.
 
 	/* output SE0 for USB reset */
 	DDRB = ~0;
