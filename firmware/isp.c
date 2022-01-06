@@ -26,10 +26,45 @@ void spiHWenable() {
 	SPSR = sck_spsr;
 }
 
+uint8_t ispAutoSCKTry(uint8_t option) {
+	uint8_t result;
+
+	if (option == USBASP_ISP_SCK_AUTO) // infinite loop!
+		return 1;
+
+	ispSetSCKOption(option);
+	ispConnect();
+	result = ispEnterProgrammingMode();
+	ispDisconnect();
+
+	return result; // 0 = no error, 1 = error (from ispEnterProgrammingMode)
+}
+
 void ispSetSCKOption(uchar option) {
 
-	if (option == USBASP_ISP_SCK_AUTO)
-		option = USBASP_ISP_SCK_375;
+	/*
+	 * In case of auto, we try out all high speed range to find the best highest speed.
+	 * If we don't find any, then the default speed is the highest of the low range (32KHz)
+	 */
+	if (option == USBASP_ISP_SCK_AUTO) {
+		if (!ispAutoSCKTry(USBASP_ISP_SCK_1500))
+			option = USBASP_ISP_SCK_1500;
+
+		else if (!ispAutoSCKTry(USBASP_ISP_SCK_750))
+			option = USBASP_ISP_SCK_750;
+
+		else if (!ispAutoSCKTry(USBASP_ISP_SCK_375))
+			option = USBASP_ISP_SCK_375;
+
+		else if (!ispAutoSCKTry(USBASP_ISP_SCK_187_5))
+			option = USBASP_ISP_SCK_187_5;
+
+		else if (!ispAutoSCKTry(USBASP_ISP_SCK_93_75))
+			option = USBASP_ISP_SCK_93_75;
+
+		else
+			option = USBASP_ISP_SCK_32; // new deault value
+	}
 
 	if (option >= USBASP_ISP_SCK_93_75) {
 		ispTransmit = ispTransmit_hw;
@@ -37,11 +72,11 @@ void ispSetSCKOption(uchar option) {
 		sck_sw_delay = 1;	/* force RST#/SCK pulse for 320us */
 
 		switch (option) {
-
 		case USBASP_ISP_SCK_1500:
 			/* enable SPI, master, 1.5MHz, XTAL/8 */
 			sck_spcr = (1 << SPE) | (1 << MSTR) | (1 << SPR0);
 			sck_spsr = (1 << SPI2X);
+			break;
 		case USBASP_ISP_SCK_750:
 			/* enable SPI, master, 750kHz, XTAL/16 */
 			sck_spcr = (1 << SPE) | (1 << MSTR) | (1 << SPR0);
@@ -181,7 +216,7 @@ uchar ispTransmit_hw(uchar send_byte) {
 
 uchar ispEnterProgrammingMode() {
 	uchar check;
-	uchar count = 32;
+	uchar count = 32, n;
 
 	while (count--) {
 		ispTransmit(0xAC);
@@ -196,11 +231,11 @@ uchar ispEnterProgrammingMode() {
 		spiHWdisable();
 
 		/* pulse RST */
-		ispDelay();
+		for (n=((32-count)/4)+1;n>0;n++, ispDelay());
 		ISP_OUT |= (1 << ISP_RST); /* RST high */
-		ispDelay();
+		for (n=((32-count)/4)+1;n>0;n++, ispDelay());
 		ISP_OUT &= ~(1 << ISP_RST); /* RST low */
-		ispDelay();
+		for (n=((32-count)/4)+1;n>0;n++, ispDelay());
 
 		if (ispTransmit == ispTransmit_hw) {
 			spiHWenable();
