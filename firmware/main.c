@@ -24,6 +24,10 @@
 #include "clock.h"
 #include "tpi.h"
 #include "tpi_defs.h"
+#include "pdi.h"
+#include <string.h>
+
+#include <util/delay.h> //after clock.h
 
 static uchar replyBuffer[8];
 
@@ -36,6 +40,9 @@ static unsigned int prog_nbytes = 0;
 static unsigned int prog_pagesize;
 static uchar prog_blockflags;
 static uchar prog_pagecounter;
+
+static uchar prog_buf[128];
+static uchar prog_buf_pos;
 
 uchar usbFunctionSetup(uchar data[8]) {
 
@@ -178,19 +185,39 @@ uchar usbFunctionSetup(uchar data[8]) {
 		prog_state = PROG_STATE_TPI_READ;
 		len = 0xff; /* multiple in */
 	
-	} else if (data[1] == USBASP_FUNC_TPI_WRITEBLOCK) {
-		prog_address = (data[3] << 8) | data[2];
-		prog_nbytes = (data[7] << 8) | data[6];
-		prog_state = PROG_STATE_TPI_WRITE;
-		len = 0xff; /* multiple out */
-	
 	} else if (data[1] == USBASP_FUNC_GETCAPABILITIES) {
-		replyBuffer[0] = USBASP_CAP_0_TPI;
+		replyBuffer[0] = USBASP_CAP_0_TPI | USBASP_CAP_0_PDI;
 		replyBuffer[1] = 0;
 		replyBuffer[2] = 0;
 		replyBuffer[3] = 0;
 		len = 4;
-	}
+
+	} else if (data[1] == USBASP_FUNC_PDI_CONNECT)
+		{
+		if ((replyBuffer[0]=pdiInit())==PDI_STATUS_OK)
+			ledRedOn();
+		len=1;
+		}
+	else if (data[1] == USBASP_FUNC_PDI_DISCONNECT)
+		{
+		ledRedOff();
+		pdiCleanup(data[2]);
+		}
+	else if (data[1] == USBASP_FUNC_PDI_SEND)
+		{
+		prog_nbytes = (data[7] << 8) | data[6];
+		prog_blockflags = data[2];
+		prog_state = PROG_STATE_PDI_SEND;
+		prog_buf_pos = 0;
+		len = 0xff;
+		}
+	else if (data[1] == USBASP_FUNC_PDI_READ)
+		{
+		memmove(&prog_address,data+2,4);
+		prog_nbytes = (data[7] << 8) | data[6];
+		prog_state = PROG_STATE_PDI_READ;
+		len = 0xff;
+		}
 
 	usbMsgPtr = replyBuffer;
 
@@ -201,34 +228,49 @@ uchar usbFunctionRead(uchar *data, uchar len) {
 
 	uchar i;
 
-	/* check if programmer is in correct read state */
-	if ((prog_state != PROG_STATE_READFLASH) && (prog_state
-			!= PROG_STATE_READEEPROM) && (prog_state != PROG_STATE_TPI_READ)) {
-		return 0xff;
-	}
+	switch(prog_state)
+		{
+		case PROG_STATE_TPI_READ:
+			/* fill packet TPI mode */
+			tpi_read_block(prog_address, data, len);
+			prog_address += len;
+			return len;
 
-	/* fill packet TPI mode */
-	if(prog_state == PROG_STATE_TPI_READ)
-	{
-		tpi_read_block(prog_address, data, len);
-		prog_address += len;
-		return len;
-	}
-
-	/* fill packet ISP mode */
-	for (i = 0; i < len; i++) {
-		if (prog_state == PROG_STATE_READFLASH) {
+		case PROG_STATE_PDI_READ:
+			{
+			pdiDisableTimerClock();
+			pdiSendIdle();
+			if (pdi_nvmbusy)
+				pdiWaitNVM();
+			uchar ret=pdiReadBlock(prog_address, data, len);
+			pdiEnableTimerClock();
+			if (ret!=PDI_STATUS_OK)
+				return 0;
+			prog_address += len;
+			return len;
+			}
+			
+		case PROG_STATE_READFLASH:
+		case PROG_STATE_READEEPROM:
+			/* fill packet ISP mode */
+			for (i = 0; i < len; i++) {
+			if (prog_state == PROG_STATE_READFLASH) {
 			data[i] = ispReadFlash(prog_address);
-		} else {
+			} else {
 			data[i] = ispReadEEPROM(prog_address);
-		}
-		prog_address++;
-	}
+			}
+			prog_address++;
+			}
+			
+			/* last packet? */
+			if (len < 8) {
+			prog_state = PROG_STATE_IDLE;
+			}
+			break;
 
-	/* last packet? */
-	if (len < 8) {
-		prog_state = PROG_STATE_IDLE;
-	}
+		default: //incorrect read state
+			return 0xff;
+		}
 
 	return len;
 }
@@ -238,25 +280,42 @@ uchar usbFunctionWrite(uchar *data, uchar len) {
 	uchar retVal = 0;
 	uchar i;
 
-	/* check if programmer is in correct write state */
-	if ((prog_state != PROG_STATE_WRITEFLASH) && (prog_state
-			!= PROG_STATE_WRITEEEPROM) && (prog_state != PROG_STATE_TPI_WRITE)) {
-		return 0xff;
-	}
-
-	if (prog_state == PROG_STATE_TPI_WRITE)
-	{
-		tpi_write_block(prog_address, data, len);
-		prog_address += len;
-		prog_nbytes -= len;
-		if(prog_nbytes <= 0)
+	switch(prog_state)
 		{
-			prog_state = PROG_STATE_IDLE;
-			return 1;
-		}
-		return 0;
-	}
+		case PROG_STATE_TPI_WRITE:
+			tpi_write_block(prog_address, data, len);
+			prog_address += len;
+			prog_nbytes -= len;
+			if(prog_nbytes <= 0)
+				{
+				prog_state = PROG_STATE_IDLE;
+				return 1;
+				}
+			return 0;
 
+		case PROG_STATE_PDI_SEND:
+			{
+			memmove(&prog_buf[prog_buf_pos],data,len);
+			prog_buf_pos += len;
+			prog_nbytes -= len;
+			if (prog_nbytes==0)
+				{
+				pdiDisableTimerClock();
+				pdiSendIdle();
+				if ((prog_blockflags & USBASP_PDI_WAIT_BUSY) && pdi_nvmbusy)
+					pdiWaitNVM();
+				pdiSendBytes(prog_buf,prog_buf_pos);
+				if (prog_blockflags & USBASP_PDI_MARK_BUSY)
+					pdi_nvmbusy=1;
+				pdiEnableTimerClock();
+				prog_state = PROG_STATE_IDLE;
+				return 1;
+				}
+			return 0;
+			}
+
+		case PROG_STATE_WRITEFLASH:
+		case PROG_STATE_WRITEEEPROM:
 	for (i = 0; i < len; i++) {
 
 		if (prog_state == PROG_STATE_WRITEFLASH) {
@@ -296,6 +355,11 @@ uchar usbFunctionWrite(uchar *data, uchar len) {
 
 		prog_address++;
 	}
+	break;
+
+		default: //incorrect write state
+			return 0xff;
+		}
 
 	return retVal;
 }
@@ -337,4 +401,3 @@ int main(void) {
 	}
 	return 0;
 }
-
