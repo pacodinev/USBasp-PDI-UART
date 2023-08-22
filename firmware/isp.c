@@ -161,7 +161,7 @@ void ispConnect() {
 	}
 	
 	/* Initial extended address value */
-	isp_hiaddr = 0;
+	isp_hiaddr = 0xFF;
 }
 
 void ispDisconnect() {
