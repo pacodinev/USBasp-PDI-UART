@@ -37,7 +37,8 @@ help:
 	@echo "       ISP=${ISP}"
 	@echo "       PORT=${PORT}"
 
-COMPILE = avr-gcc -Wall -O2 -ffunction-sections -fdata-sections -Iusbdrv -I. -mmcu=$(TARGET) # -DDEBUG_LEVEL=2
+# --param=min-pagesize=0 is needed for GCC12/13
+COMPILE = avr-gcc -Wall -O2 -ffunction-sections -fdata-sections -Iusbdrv -I. -mmcu=$(TARGET) # --param=min-pagesize=0 # -DDEBUG_LEVEL=2
 
 OBJECTS = usbdrv/usbdrv.o usbdrv/usbdrvasm.o usbdrv/oddebug.o isp.o clock.o tpi.o main.o pdi.o uart.o
 
